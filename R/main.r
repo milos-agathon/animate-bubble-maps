@@ -300,3 +300,8 @@ timelapse_map_monthly <- map_monthly +
         fps = 15,
         renderer = gifski_renderer(loop = T)
    ) 
+
+gganimate::anim_save(
+    "violence_vs_civilians_syria2.gif",
+    animated_map_monthly
+)
