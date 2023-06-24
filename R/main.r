@@ -1,1 +1,302 @@
+###################################################
+#                 Let's animate bubble maps with R
+#                 Milos Popovic
+#                 2023/06/21
+###################################################
+# libraries we need
+libs <- c(
+    "tidyverse", "giscoR",
+    "sf", "gganimate", "classInt"
+)
 
+# install missing libraries
+installed_libs <- libs %in% rownames(
+    installed.packages()
+)
+
+if (any(installed_libs == F)) {
+    install.packages(
+        libs[!installed_libs]
+    )
+}
+
+# load libraries
+
+invisible(lapply(libs, library, character.only = T))
+
+# 1. DATA
+#-----------
+url <- "https://ucdp.uu.se/downloads/ged/ged231-csv.zip"
+file_name <- "ucdp-ged.zip"
+
+download.file(
+    url = url,
+    destfile = file_name,
+    mode = "wb"
+)
+
+unzip(file_name)
+
+ucdp_ged <- read.csv(
+    "GEDEvent_v23_1.csv",
+    sep = ","
+)
+
+names(ucdp_ged)
+
+# Syria dataframe
+unique(ucdp_ged$country)
+ucdp_ged_syria <- ucdp_ged |>
+    dplyr::filter(
+        country == "Syria"
+    ) |>
+    dplyr::select(
+        26, 30:31, 39,
+        43
+    ) |>
+    dplyr::mutate(
+        time = as.Date(
+            date_start
+        )
+    ) |>
+    dplyr::filter(
+        time >= as.Date(
+            "2011-03-15"
+        )
+    ) |>
+    dplyr::mutate(
+        month_year = as.factor(format(
+            as.Date(time), "%Y-%m"
+        ))
+    )
+
+
+summary(ucdp_ged_syria)
+levels(ucdp_ged_syria$month_year)
+
+# 2. AGGREGATE MONTHLY
+#---------------------
+
+ucdp_ged_syria_monthly <- ucdp_ged_syria |>
+    dplyr::group_by(
+        where_coordinates,
+        latitude,
+        longitude,
+        month_year
+    ) |>
+    dplyr::summarise(
+        sum_violence = sum(
+            deaths_civilians
+        )
+    ) |>
+    dplyr::mutate(
+        sum_violence = replace(
+            sum_violence,
+            sum_violence == 0,
+            NA
+        )
+    )
+
+head(ucdp_ged_syria_monthly)
+summary(ucdp_ged_syria_monthly$sum_violence)
+
+# 3. CREATE POINT SHP
+#--------------------
+# define longlat projection
+crs_longlat <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+ucdp_ged_syria_monthly_sf <- ucdp_ged_syria_monthly |>
+    sf::st_as_sf(
+        coords = c(
+            "longitude",
+            "latitude"
+        )
+    ) |>
+    sf::st_set_crs(
+        crs_longlat
+    )
+
+# 4. BREAKS
+#----------
+
+breaks <- classInt::classIntervals(
+    ucdp_ged_syria_monthly_sf$sum_violence,
+    n = 6,
+    style = "fisher"
+)$brks
+
+vmin <- min(
+    ucdp_ged_syria_monthly_sf$sum_violence,
+    na.rm = T
+)
+
+vmax <- max(
+    ucdp_ged_syria_monthly_sf$sum_violence,
+    na.rm = T
+)
+
+# 5. SYRIA SHAPEFILE
+#-------------------
+# load national map of Syria
+
+syria_sf <- giscoR::gisco_get_countries(
+    resolution = "1",
+    country = "SY",
+    cache = T,
+    update_cache = T
+) |>
+    sf::st_transform(
+        crs = crs_longlat
+    )
+
+plot(sf::st_geometry(
+    syria_sf
+))
+
+# 6. DEADLIEST SYRIAN TOWNS
+#--------------------------
+
+ucdp_ged_syria_monthly_sf <-
+    ucdp_ged_syria_monthly_sf[order(
+        -ucdp_ged_syria_monthly_sf$sum_violence
+    ), ]
+
+dplyr::filter(
+    ucdp_ged_syria_monthly_sf, 
+    grepl("Damascus", where_coordinates
+    )
+)
+
+all_syria_towns <- ucdp_ged_syria_monthly_sf |>
+    dplyr::filter(
+        grepl(
+            "town|city",
+            where_coordinates
+        )
+    ) |>
+    dplyr::mutate_at(
+        "where_coordinates",
+        stringr::str_replace_all,
+        c(" town" = "", " city" = "")
+    ) |>
+    dplyr::distinct(
+        where_coordinates,
+        geometry
+    )
+
+# 7. STATIC VIOLENCE MAP
+#-----------------------
+
+get_syria_violence_monthly_map <- function() {
+    map_monthly <- ggplot() +
+        geom_sf(
+            data = ucdp_ged_syria_monthly_sf,
+            aes(size = sum_violence),
+            color = "#FF0899",
+            alpha = 1
+        ) +
+        geom_sf(
+            data = syria_sf,
+            fill = "transparent",
+            color = "grey10",
+            size = .25
+        ) +
+        geom_sf_text(
+            data = all_syria_towns[
+                c(1, 3:4, 6, 9:10),
+            ],
+            aes(
+                label = where_coordinates
+            ),
+            nudge_y = -.05
+        ) +
+        geom_sf(
+            data = all_syria_towns[
+                c(1, 3:4, 6, 9:10),
+            ],
+            shape = 1,
+            fill = "grey10",
+            size = 3
+        ) +
+        scale_size(
+            breaks = round(breaks, 0),
+            range = c(1, 12),
+            limits = c(vmin, vmax),
+            name = "Civilian deaths"
+        ) +
+        guides(
+            size = guide_legend(
+                direction = "vertical",
+                title.position = "top",
+                label.position = "right",
+                title.hjust = .5,
+                label.hjust = 0,
+                ncol = 1,
+                byrow = T
+            )
+        ) +
+        coord_sf() +
+        theme_void() +
+        theme(
+            legend.position = "right",
+            legend.text = element_text(
+                size = 11, color = "grey10"
+            ),
+            legend.title = element_text(
+                size = 12, color = "grey10"
+            ),
+            plot.title = element_text(
+                size = 20, color = "grey10",
+                hjust = .5, vjust = -3
+            ),
+            plot.subtitle = element_text(
+                size = 40, color = "#FF0899",
+                hjust = .5, vjust = -1
+            ),
+            plot.caption = element_text(
+                size = 10, color = "grey10",
+                hjust = .5, vjust = -10
+            ),
+            plot.margin = unit(
+                c(t = -1, r = 3, b = -1, l = -1),
+                "lines"
+            )
+        ) +
+        labs(
+            x = "",
+            y = "",
+            title = "Civilian deaths in Syrian Civil war",
+            caption = "UCDP GED v. 20.1",
+            subtitle = "{as.factor(closest_state)}"
+        )
+    return(map_monthly)
+}
+
+map_monthly <- get_syria_violence_monthly_map()
+print(map_monthly)
+
+# 8. ANIMATE - MONTHLY
+#---------------------
+timelapse_map_monthly <- map_monthly +
+    gganimate::transition_states(
+        month_year,
+        transition_length = 3,
+        state_length = 1
+    ) +
+    enter_fade() +
+    exit_fade() +
+    ease_aes("linear", interval = .2)
+
+   animated_map_monthly <- gganimate::animate(
+        timelapse_map_monthly,
+        nframes = 150,
+        duration = 20,
+        start_pause = 3,
+        end_pause = 30,
+        res = 300,
+        units = "in",
+        width = 7,
+        height = 7,
+        fps = 15,
+        renderer = gifski_renderer(loop = T)
+   ) 
